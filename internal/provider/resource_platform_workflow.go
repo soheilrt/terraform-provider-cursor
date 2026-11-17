@@ -167,6 +167,7 @@ type triggerModel struct {
 	GitPullRequest               *gitPullRequestModel                      `tfsdk:"git_pull_request"`
 	GitPush                      *gitPushModel                             `tfsdk:"git_push"`
 	GitCICompleted               *gitCICompletedModel                      `tfsdk:"git_ci_completed"`
+	GitWorkflowRun               *gitWorkflowRunModel                      `tfsdk:"git_workflow_run"`
 	GitLabel                     *gitLabelModel                            `tfsdk:"git_label"`
 	Cron                         *cronModel                                `tfsdk:"cron"`
 	Slack                        *slackTriggerModel                        `tfsdk:"slack"`
@@ -185,7 +186,7 @@ type triggerModel struct {
 
 // triggerTypeNames lists the trigger block names in schema order, used for
 // the "exactly one trigger type" error message.
-const triggerTypeNames = "git_pull_request, git_push, git_ci_completed, git_label, cron, slack, slack_channel_created, slack_reaction_added, slack_mention, slack_any_reaction_added, linear, webhook, pagerduty, sentry, microsoft_teams, or microsoft_teams_channel_created"
+const triggerTypeNames = "git_pull_request, git_push, git_ci_completed, git_workflow_run, git_label, cron, slack, slack_channel_created, slack_reaction_added, slack_mention, slack_any_reaction_added, linear, webhook, pagerduty, sentry, microsoft_teams, or microsoft_teams_channel_created"
 
 const actionTypeNames = "pr_comment, git_pr, request_reviewers, mcp, slack, read_slack, microsoft_teams, read_microsoft_teams, manage_check_run, approve_pr, or resolve_review_threads"
 
@@ -208,6 +209,13 @@ type gitCICompletedModel struct {
 	Condition          types.String `tfsdk:"condition"`
 	IgnoreBaseFailures types.Bool   `tfsdk:"ignore_base_failures"`
 	Branch             types.String `tfsdk:"branch"`
+}
+
+type gitWorkflowRunModel struct {
+	Repos         types.List   `tfsdk:"repos"`
+	WorkflowNames types.List   `tfsdk:"workflow_names"`
+	Branch        types.String `tfsdk:"branch"`
+	Conclusion    types.String `tfsdk:"conclusion"`
 }
 
 type cronModel struct {
@@ -414,7 +422,7 @@ func (r *platformWorkflowResource) Metadata(_ context.Context, req resource.Meta
 
 func (r *platformWorkflowResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Manages a Cursor Automation: a prompt plus triggers (pull requests, pushes, CI completions, cron, Slack, Linear, webhooks, PagerDuty, Sentry, Microsoft Teams) and actions (PR comments, PRs, reviewers, check runs, MCP servers, Slack, Microsoft Teams).",
+		Description: "Manages a Cursor Automation: a prompt plus triggers (pull requests, pushes, CI completions, workflow runs, cron, Slack, Linear, webhooks, PagerDuty, Sentry, Microsoft Teams) and actions (PR comments, PRs, reviewers, check runs, MCP servers, Slack, Microsoft Teams).",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:    true,
@@ -629,6 +637,30 @@ func (r *platformWorkflowResource) Schema(_ context.Context, _ resource.SchemaRe
 								"branch": schema.StringAttribute{
 									Optional:    true,
 									Description: `If set, trigger on CI completion for this branch (e.g. "main") instead of on PRs. user_allowlist and ignore_base_failures are ignored in branch mode.`,
+								},
+							},
+						},
+						"git_workflow_run": schema.SingleNestedAttribute{
+							Optional:    true,
+							Description: "Trigger when a GitHub Actions workflow run completes. Distinct from git_ci_completed, which fires on the aggregate check suite.",
+							Attributes: map[string]schema.Attribute{
+								"repos": schema.ListAttribute{
+									Required:    true,
+									ElementType: types.StringType,
+									Description: "GitHub repos to watch (owner/name or URL). At least one is required.",
+								},
+								"workflow_names": schema.ListAttribute{
+									Optional:    true,
+									ElementType: types.StringType,
+									Description: `Workflow file names to match (e.g. "deploy.yml"). Omit to fire for every workflow in the repo.`,
+								},
+								"branch": schema.StringAttribute{
+									Optional:    true,
+									Description: "If set, only runs for this branch fire the trigger.",
+								},
+								"conclusion": schema.StringAttribute{
+									Optional:    true,
+									Description: `Which run conclusion fires the trigger: "failure", "success", "cancelled", or "any". Unset is treated as any.`,
 								},
 							},
 						},
@@ -1218,6 +1250,7 @@ func (r *platformWorkflowResource) Create(ctx context.Context, req resource.Crea
 func preserveConfiguredValues(ctx context.Context, state *platformWorkflowModel, reference platformWorkflowModel) {
 	preserveEquivalentGitPullRequestOrgs(ctx, state, reference)
 	preserveEquivalentGitCICompletionConditions(state, reference)
+	preserveEquivalentGitWorkflowRunConclusions(state, reference)
 	preserveEquivalentEnvironmentPublicID(state, reference)
 	preserveEquivalentModelSelection(state, reference)
 	preserveEmptyDescription(state, reference)
@@ -2023,6 +2056,25 @@ func preserveEquivalentGitCICompletionConditions(state *platformWorkflowModel, r
 	}
 }
 
+// Preserve practitioner-supplied conclusion casing when it maps to the same
+// API enum value, avoiding post-apply state mismatches.
+func preserveEquivalentGitWorkflowRunConclusions(state *platformWorkflowModel, reference platformWorkflowModel) {
+	if state == nil {
+		return
+	}
+
+	for i := 0; i < len(state.Triggers) && i < len(reference.Triggers); i++ {
+		stateRun := state.Triggers[i].GitWorkflowRun
+		referenceRun := reference.Triggers[i].GitWorkflowRun
+		if stateRun == nil || referenceRun == nil {
+			continue
+		}
+		if gitCICompletionConditionsEqualFold(stateRun.Conclusion, referenceRun.Conclusion) {
+			stateRun.Conclusion = referenceRun.Conclusion
+		}
+	}
+}
+
 func gitCICompletionConditionsEqualFold(current, reference types.String) bool {
 	if current.IsUnknown() || reference.IsUnknown() {
 		return false
@@ -2407,6 +2459,11 @@ func gitConfigRepos(gitRepo string, triggers []*v1.Trigger) []string {
 				add(repo)
 			}
 		}
+		if run := git.GetWorkflowRun(); run != nil {
+			for _, repo := range run.GetRepos() {
+				add(repo)
+			}
+		}
 	}
 	return repos
 }
@@ -2595,6 +2652,9 @@ func triggerModelToProto(ctx context.Context, t *triggerModel) (*v1.Trigger, err
 	if t.GitCICompleted != nil {
 		count++
 	}
+	if t.GitWorkflowRun != nil {
+		count++
+	}
 	if t.GitLabel != nil {
 		count++
 	}
@@ -2740,6 +2800,59 @@ func triggerModelToProto(ctx context.Context, t *triggerModel) (*v1.Trigger, err
 		}
 		gitTrigger := &v1.GitTrigger{
 			Event: &v1.GitTrigger_CiCompleted{CiCompleted: event},
+		}
+		if !t.UserAllowlist.IsNull() && !t.UserAllowlist.IsUnknown() {
+			var users []string
+			diags := t.UserAllowlist.ElementsAs(ctx, &users, false)
+			if diags.HasError() {
+				return nil, fmt.Errorf("failed to read user_allowlist")
+			}
+			gitTrigger.UserAllowlist = users
+		}
+		trigger.Trigger = &v1.Trigger_Git{Git: gitTrigger}
+	}
+
+	// GitHub Actions workflow run, not the aggregate check suite.
+	if run := t.GitWorkflowRun; run != nil {
+		repos, err := readStringList(ctx, run.Repos, "git_workflow_run.repos")
+		if err != nil {
+			return nil, err
+		}
+		normalizedRepos := make([]string, 0, len(repos))
+		for _, repo := range repos {
+			normalizedRepo := strings.TrimSpace(repo)
+			if normalizedRepo != "" {
+				normalizedRepos = append(normalizedRepos, normalizedRepo)
+			}
+		}
+		if len(normalizedRepos) == 0 {
+			return nil, fmt.Errorf("git_workflow_run must specify at least one repo")
+		}
+		event := &v1.GitWorkflowRunEvent{Repos: normalizedRepos}
+		if !run.WorkflowNames.IsNull() && !run.WorkflowNames.IsUnknown() {
+			names, err := readStringList(ctx, run.WorkflowNames, "git_workflow_run.workflow_names")
+			if err != nil {
+				return nil, err
+			}
+			for _, name := range names {
+				name = strings.TrimSpace(name)
+				if name != "" {
+					event.WorkflowNames = append(event.WorkflowNames, name)
+				}
+			}
+		}
+		if !run.Conclusion.IsNull() && !run.Conclusion.IsUnknown() {
+			conclusion, err := parseWorkflowRunConclusion(run.Conclusion.ValueString())
+			if err != nil {
+				return nil, err
+			}
+			event.Conclusion = conclusion
+		}
+		if !run.Branch.IsNull() && !run.Branch.IsUnknown() {
+			event.Branch = run.Branch.ValueString()
+		}
+		gitTrigger := &v1.GitTrigger{
+			Event: &v1.GitTrigger_WorkflowRun{WorkflowRun: event},
 		}
 		if !t.UserAllowlist.IsNull() && !t.UserAllowlist.IsUnknown() {
 			var users []string
@@ -3405,6 +3518,36 @@ func parseCICompletionCondition(s string) (v1.GitCICompletionCondition, error) {
 	}
 }
 
+func parseWorkflowRunConclusion(s string) (v1.GitWorkflowRunConclusion, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "failure":
+		return v1.GitWorkflowRunConclusion_GIT_WORKFLOW_RUN_CONCLUSION_FAILURE, nil
+	case "success":
+		return v1.GitWorkflowRunConclusion_GIT_WORKFLOW_RUN_CONCLUSION_SUCCESS, nil
+	case "cancelled":
+		return v1.GitWorkflowRunConclusion_GIT_WORKFLOW_RUN_CONCLUSION_CANCELLED, nil
+	case "any":
+		return v1.GitWorkflowRunConclusion_GIT_WORKFLOW_RUN_CONCLUSION_ANY, nil
+	default:
+		return 0, fmt.Errorf("invalid git_workflow_run.conclusion %q, must be failure/success/cancelled/any", s)
+	}
+}
+
+func workflowRunConclusionToString(c v1.GitWorkflowRunConclusion) string {
+	switch c {
+	case v1.GitWorkflowRunConclusion_GIT_WORKFLOW_RUN_CONCLUSION_FAILURE:
+		return "failure"
+	case v1.GitWorkflowRunConclusion_GIT_WORKFLOW_RUN_CONCLUSION_SUCCESS:
+		return "success"
+	case v1.GitWorkflowRunConclusion_GIT_WORKFLOW_RUN_CONCLUSION_CANCELLED:
+		return "cancelled"
+	case v1.GitWorkflowRunConclusion_GIT_WORKFLOW_RUN_CONCLUSION_ANY:
+		return "any"
+	default:
+		return ""
+	}
+}
+
 func ciCompletionConditionToString(c v1.GitCICompletionCondition) string {
 	switch c {
 	case v1.GitCICompletionCondition_GIT_CI_COMPLETION_CONDITION_FAILURE:
@@ -3721,6 +3864,30 @@ func protoTriggerToModel(ctx context.Context, t *v1.Trigger) (triggerModel, erro
 				ciModel.Branch = types.StringNull()
 			}
 			tm.GitCICompleted = ciModel
+
+		case *v1.GitTrigger_WorkflowRun:
+			run := event.WorkflowRun
+			runModel := &gitWorkflowRunModel{
+				Repos:         types.ListNull(types.StringType),
+				WorkflowNames: types.ListNull(types.StringType),
+				Branch:        types.StringNull(),
+				Conclusion:    types.StringNull(),
+			}
+			if len(run.GetRepos()) > 0 {
+				repos, _ := types.ListValueFrom(ctx, types.StringType, run.GetRepos())
+				runModel.Repos = repos
+			}
+			if len(run.GetWorkflowNames()) > 0 {
+				names, _ := types.ListValueFrom(ctx, types.StringType, run.GetWorkflowNames())
+				runModel.WorkflowNames = names
+			}
+			if run.GetBranch() != "" {
+				runModel.Branch = types.StringValue(run.GetBranch())
+			}
+			if run.GetConclusion() != v1.GitWorkflowRunConclusion_GIT_WORKFLOW_RUN_CONCLUSION_UNSPECIFIED {
+				runModel.Conclusion = types.StringValue(workflowRunConclusionToString(run.GetConclusion()))
+			}
+			tm.GitWorkflowRun = runModel
 
 		case *v1.GitTrigger_Label:
 			label := event.Label

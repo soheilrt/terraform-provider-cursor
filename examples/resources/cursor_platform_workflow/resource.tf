@@ -135,3 +135,23 @@ resource "cursor_platform_workflow" "example_incidents" {
     }
   ]
 }
+
+resource "cursor_platform_workflow" "example_workflow_run" {
+  name   = "Fix failed workflow runs"
+  prompt = "Read the failed workflow log and open a pull request with a fix."
+
+  trigger = [
+    {
+      git_workflow_run = {
+        repos      = ["https://github.com/example-org/example-repo"]
+        conclusion = "failure"
+      }
+    }
+  ]
+
+  action = [
+    {
+      git_pr = {}
+    }
+  ]
+}

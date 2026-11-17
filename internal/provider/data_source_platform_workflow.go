@@ -204,6 +204,30 @@ func (d *platformWorkflowDataSource) Schema(_ context.Context, _ datasource.Sche
 								},
 							},
 						},
+						"git_workflow_run": schema.SingleNestedAttribute{
+							Computed:    true,
+							Description: "Trigger when a GitHub Actions workflow run completes.",
+							Attributes: map[string]schema.Attribute{
+								"repos": schema.ListAttribute{
+									Computed:    true,
+									ElementType: types.StringType,
+									Description: "GitHub repos to watch.",
+								},
+								"workflow_names": schema.ListAttribute{
+									Computed:    true,
+									ElementType: types.StringType,
+									Description: "Workflow file names that fire the trigger. Empty means every workflow.",
+								},
+								"branch": schema.StringAttribute{
+									Computed:    true,
+									Description: "Branch filter, when set.",
+								},
+								"conclusion": schema.StringAttribute{
+									Computed:    true,
+									Description: `Run conclusion that fires the trigger: "failure", "success", "cancelled", or "any".`,
+								},
+							},
+						},
 						"cron": schema.SingleNestedAttribute{
 							Computed:    true,
 							Description: "Trigger on a cron schedule.",

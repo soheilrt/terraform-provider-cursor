@@ -706,6 +706,191 @@ func TestGitCICompletedTriggerRoundTrip(t *testing.T) {
 	})
 }
 
+func TestGitWorkflowRunTriggerRoundTrip(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("model_to_proto", func(t *testing.T) {
+		m := &platformWorkflowModel{
+			Prompt: types.StringValue("fix the failed run"),
+			Triggers: []triggerModel{
+				{
+					GitWorkflowRun: &gitWorkflowRunModel{
+						Repos:         mustStringList(t, ctx, []string{"https://github.com/org/repo"}),
+						WorkflowNames: mustStringList(t, ctx, []string{"deploy.yml"}),
+						Branch:        types.StringValue("main"),
+						Conclusion:    types.StringValue("failure"),
+					},
+					UserAllowlist: types.ListNull(types.StringType),
+				},
+			},
+		}
+
+		wf, err := modelToWorkflow(ctx, m)
+		if err != nil {
+			t.Fatalf("modelToWorkflow() error: %v", err)
+		}
+		run := wf.Triggers[0].GetGit().GetWorkflowRun()
+		if run == nil {
+			t.Fatal("expected workflow_run trigger in proto")
+		}
+		if got, want := run.GetRepos(), []string{"https://github.com/org/repo"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("repos = %v, want %v", got, want)
+		}
+		if got, want := run.GetWorkflowNames(), []string{"deploy.yml"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("workflow_names = %v, want %v", got, want)
+		}
+		if got, want := run.GetBranch(), "main"; got != want {
+			t.Fatalf("branch = %q, want %q", got, want)
+		}
+		if got, want := run.GetConclusion(), v1.GitWorkflowRunConclusion_GIT_WORKFLOW_RUN_CONCLUSION_FAILURE; got != want {
+			t.Fatalf("conclusion = %v, want %v", got, want)
+		}
+		if got, want := wf.GitConfig.GetRepos(), []string{"https://github.com/org/repo"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("GitConfig.Repos = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("model_to_proto_requires_repos", func(t *testing.T) {
+		m := &platformWorkflowModel{
+			Prompt: types.StringValue("fix the failed run"),
+			Triggers: []triggerModel{
+				{
+					GitWorkflowRun: &gitWorkflowRunModel{
+						Repos: types.ListNull(types.StringType),
+					},
+					UserAllowlist: types.ListNull(types.StringType),
+				},
+			},
+		}
+
+		_, err := modelToWorkflow(ctx, m)
+		if err == nil {
+			t.Fatal("expected error for missing repos")
+		}
+		if !strings.Contains(err.Error(), "git_workflow_run must specify at least one repo") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("model_to_proto_invalid_conclusion", func(t *testing.T) {
+		m := &platformWorkflowModel{
+			Prompt: types.StringValue("fix the failed run"),
+			Triggers: []triggerModel{
+				{
+					GitWorkflowRun: &gitWorkflowRunModel{
+						Repos:      mustStringList(t, ctx, []string{"org/repo"}),
+						Conclusion: types.StringValue("sometimes"),
+					},
+					UserAllowlist: types.ListNull(types.StringType),
+				},
+			},
+		}
+
+		_, err := modelToWorkflow(ctx, m)
+		if err == nil {
+			t.Fatal("expected error for invalid conclusion")
+		}
+		if !strings.Contains(err.Error(), "invalid git_workflow_run.conclusion") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("proto_to_model", func(t *testing.T) {
+		input := &v1.AutomationWithOwner{
+			Workflow: &v1.Automation{
+				Workflow: &v1.Workflow{
+					Prompts: []*v1.Prompt{{Prompt: "fix the failed run"}},
+					Triggers: []*v1.Trigger{
+						{
+							Trigger: &v1.Trigger_Git{
+								Git: &v1.GitTrigger{
+									Event: &v1.GitTrigger_WorkflowRun{
+										WorkflowRun: &v1.GitWorkflowRunEvent{
+											Repos:         []string{"https://github.com/org/repo"},
+											WorkflowNames: []string{"deploy.yml"},
+											Branch:        "main",
+											Conclusion:    v1.GitWorkflowRunConclusion_GIT_WORKFLOW_RUN_CONCLUSION_FAILURE,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		model, err := protoToModel(ctx, input)
+		if err != nil {
+			t.Fatalf("protoToModel() error: %v", err)
+		}
+		run := model.Triggers[0].GitWorkflowRun
+		if run == nil {
+			t.Fatal("expected git_workflow_run trigger in model")
+		}
+		var repos []string
+		if diags := run.Repos.ElementsAs(ctx, &repos, false); diags.HasError() {
+			t.Fatalf("failed to read repos from model: %v", diags)
+		}
+		if got, want := repos, []string{"https://github.com/org/repo"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("repos = %v, want %v", got, want)
+		}
+		var names []string
+		if diags := run.WorkflowNames.ElementsAs(ctx, &names, false); diags.HasError() {
+			t.Fatalf("failed to read workflow names from model: %v", diags)
+		}
+		if got, want := names, []string{"deploy.yml"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("workflow_names = %v, want %v", got, want)
+		}
+		if got, want := run.Branch.ValueString(), "main"; got != want {
+			t.Fatalf("branch = %q, want %q", got, want)
+		}
+		if got, want := run.Conclusion.ValueString(), "failure"; got != want {
+			t.Fatalf("conclusion = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("proto_to_model_defaults", func(t *testing.T) {
+		input := &v1.AutomationWithOwner{
+			Workflow: &v1.Automation{
+				Workflow: &v1.Workflow{
+					Triggers: []*v1.Trigger{
+						{
+							Trigger: &v1.Trigger_Git{
+								Git: &v1.GitTrigger{
+									Event: &v1.GitTrigger_WorkflowRun{
+										WorkflowRun: &v1.GitWorkflowRunEvent{
+											Repos: []string{"org/repo"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		model, err := protoToModel(ctx, input)
+		if err != nil {
+			t.Fatalf("protoToModel() error: %v", err)
+		}
+		run := model.Triggers[0].GitWorkflowRun
+		if run == nil {
+			t.Fatal("expected git_workflow_run trigger in model")
+		}
+		if !run.Conclusion.IsNull() {
+			t.Fatalf("expected conclusion to be null, got %q", run.Conclusion.ValueString())
+		}
+		if !run.WorkflowNames.IsNull() {
+			t.Fatal("expected workflow_names to be null")
+		}
+		if !run.Branch.IsNull() {
+			t.Fatalf("expected branch to be null, got %q", run.Branch.ValueString())
+		}
+	})
+}
+
 func TestPreserveEquivalentGitCICompletionConditions(t *testing.T) {
 	state := &platformWorkflowModel{
 		Triggers: []triggerModel{

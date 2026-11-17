@@ -178,6 +178,7 @@ Read-Only:
 - `git_label` (Attributes) Trigger on GitHub pull request or issue label changes. (see [below for nested schema](#nestedatt--trigger--git_label))
 - `git_pull_request` (Attributes) Trigger on GitHub pull request events. (see [below for nested schema](#nestedatt--trigger--git_pull_request))
 - `git_push` (Attributes) Trigger on git push events. (see [below for nested schema](#nestedatt--trigger--git_push))
+- `git_workflow_run` (Attributes) Trigger when a GitHub Actions workflow run completes. (see [below for nested schema](#nestedatt--trigger--git_workflow_run))
 - `linear` (Attributes) Trigger on Linear events. (see [below for nested schema](#nestedatt--trigger--linear))
 - `microsoft_teams` (Attributes) Trigger on Microsoft Teams channel messages. (see [below for nested schema](#nestedatt--trigger--microsoft_teams))
 - `microsoft_teams_channel_created` (Attributes) Trigger when a new Microsoft Teams channel is created. (see [below for nested schema](#nestedatt--trigger--microsoft_teams_channel_created))
@@ -243,6 +244,17 @@ Read-Only:
 
 - `branch` (String) Branch to watch.
 - `repo` (String) Repository to watch.
+
+
+<a id="nestedatt--trigger--git_workflow_run"></a>
+### Nested Schema for `trigger.git_workflow_run`
+
+Read-Only:
+
+- `branch` (String) Branch filter, when set.
+- `conclusion` (String) Run conclusion that fires the trigger: "failure", "success", "cancelled", or "any".
+- `repos` (List of String) GitHub repos to watch.
+- `workflow_names` (List of String) Workflow file names that fire the trigger. Empty means every workflow.
 
 
 <a id="nestedatt--trigger--linear"></a>
